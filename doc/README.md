@@ -41,6 +41,7 @@ Per-release configuration changes that affect an existing configuration. One fil
 | --------- | --------- | ------ | ------ |
 | `v0.1.0-beta.1` | [en/v0.1.0-beta.1.md](./migration/en/v0.1.0-beta.1.md) | [zh/v0.1.0-beta.1.md](./migration/zh/v0.1.0-beta.1.md) | — |
 | `v0.1.0-beta.3` | [en/v0.1.0-beta.3.md](./migration/en/v0.1.0-beta.3.md) | [zh/v0.1.0-beta.3.md](./migration/zh/v0.1.0-beta.3.md) | — |
+| `v0.1.0-beta.7` | [en/v0.1.0-beta.7.md](./migration/en/v0.1.0-beta.7.md) | [zh/v0.1.0-beta.7.md](./migration/zh/v0.1.0-beta.7.md) | — |
 
 ## Operations / 运维
 
