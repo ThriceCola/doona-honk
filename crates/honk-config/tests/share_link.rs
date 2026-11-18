@@ -5,7 +5,8 @@ use base64::Engine as _;
 use honk_config::Config;
 use honk_config::diagnostic::{SafeValue, Severity};
 use honk_config::node::{
-    Node, Udp443Policy, VlessMultiplex, VlessUdpEncoding, VlessUdpMux, VlessUdpPath,
+    Node, ShadowsocksObfs, ShadowsocksObfsMode, ShadowsocksPlugin, Udp443Policy, VlessMultiplex,
+    VlessUdpEncoding, VlessUdpMux, VlessUdpPath,
 };
 use honk_config::types::NodeProtocol;
 
@@ -259,14 +260,57 @@ fn test_ss_base64_userinfo() {
 fn test_ss_base64_userinfo_with_padding_and_plugin_suffix() {
     // Same but padded base64 and the `/?plugin=...` suffix form.
     let node = Node::from_share_link(
-        "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388/?plugin=v2ray-plugin%3Btls#ss-pad",
+        "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388/?plugin=obfs-local%3Bobfs%3Dhttp#ss-pad",
     )
     .unwrap();
     let ss = node.shadowsocks().unwrap();
     assert_eq!(ss.encryption.as_deref(), Some("aes-256-gcm"));
     assert_eq!(ss.password.as_deref(), Some("pass"));
-    assert_eq!(ss.plugin.as_deref(), Some("v2ray-plugin"));
-    assert_eq!(ss.plugin_opts.as_deref(), Some("tls"));
+    assert_eq!(
+        ss.plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Http,
+            host: None,
+            path: None,
+        }))
+    );
+}
+
+/// A plugin honk does not implement is rejected, never kept as plain
+/// Shadowsocks metadata: dialing the ciphertext at an obfuscated server would
+/// fail with an unrelated decrypt error.
+#[test]
+fn test_ss_unsupported_plugin_is_rejected() {
+    let error = Node::from_share_link(
+        "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin=v2ray-plugin%3Btls#ss-pad",
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unsupported Shadowsocks plugin"),
+        "unexpected error: {error}"
+    );
+}
+
+/// A plugin option that cannot apply is a configuration error, not something to
+/// drop on the floor.
+#[test]
+fn test_ss_obfs_option_without_a_known_shape_is_rejected() {
+    let error = Node::from_share_link(
+        "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin=obfs-local%3Bobfs%3Dquic#ss",
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("mode must be http or tls"),
+        "unexpected error: {error}"
+    );
+    let error = Node::from_share_link(
+        "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin=obfs-local%3Bobfs%3Dtls%3Bobfs-uri%3D%2Fx#ss",
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("path requires http mode"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -308,10 +352,13 @@ fn test_ss_with_plugin() {
     assert_eq!(node.protocol(), NodeProtocol::SS);
     let ss = node.shadowsocks().unwrap();
     assert_eq!(ss.encryption.as_deref(), Some("aes-256-gcm"));
-    assert_eq!(ss.plugin.as_deref(), Some("obfs-local"));
     assert_eq!(
-        ss.plugin_opts.as_deref(),
-        Some("obfs=http;obfs-host=example.com")
+        ss.plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Http,
+            host: Some("example.com".into()),
+            path: None,
+        }))
     );
 }
 
@@ -928,16 +975,16 @@ fn test_ss_legacy_padded_plugin_suffix() {
     let payload =
         base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:plain@1.2.3.4:8388");
     let node = Node::from_share_link(&format!(
-        "ss://{payload}/?plugin=v2ray-plugin%3Btls&remark=query#name"
+        "ss://{payload}/?plugin=obfs-local%3Bobfs%3Dtls%3Bobfs-host%3Dcdn.example&remark=query#name"
     ))
     .unwrap();
     assert_eq!(
-        node.shadowsocks().unwrap().plugin.as_deref(),
-        Some("v2ray-plugin")
-    );
-    assert_eq!(
-        node.shadowsocks().unwrap().plugin_opts.as_deref(),
-        Some("tls")
+        node.shadowsocks().unwrap().plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Tls,
+            host: Some("cdn.example".into()),
+            path: None,
+        }))
     );
     assert_eq!(node.name, "name");
 }
@@ -945,16 +992,19 @@ fn test_ss_legacy_padded_plugin_suffix() {
 #[test]
 fn test_ss_legacy_unpadded_plugin_delimiter() {
     let payload = b64("aes-256-gcm:abcdefghijklmnop@1.2.3.4:8388");
-    let node =
-        Node::from_share_link(&format!("ss://{payload}/?plugin=v2ray-plugin%3Btls#name")).unwrap();
+    let node = Node::from_share_link(&format!(
+        "ss://{payload}/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-uri%3Dasset#name"
+    ))
+    .unwrap();
     assert_eq!(node.port, 8388);
     assert_eq!(
-        node.shadowsocks().unwrap().plugin.as_deref(),
-        Some("v2ray-plugin")
-    );
-    assert_eq!(
-        node.shadowsocks().unwrap().plugin_opts.as_deref(),
-        Some("tls")
+        node.shadowsocks().unwrap().plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Http,
+            host: None,
+            path: Some("/asset".into()),
+        })),
+        "a bare path gains its leading slash"
     );
     assert_eq!(node.name, "name");
 }

@@ -163,28 +163,7 @@ impl<'a> AdmissionOwner<'a> {
         } = outcome;
         match kind {
             IndexedOutcomeKind::Node(node) => {
-                if node.shadowsocks().is_some_and(|config| {
-                    config
-                        .plugin
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-                        || config
-                            .plugin_opts
-                            .as_deref()
-                            .is_some_and(|value| !value.trim().is_empty())
-                }) {
-                    self.emit_indexed(
-                        "unsupported-subscription-entry",
-                        Severity::Warning,
-                        ordinal,
-                        line,
-                        path,
-                        (
-                            None,
-                            "subscription node uses an unsupported proxy plugin; ignored",
-                        ),
-                    );
-                } else if let Some(first) = self.seen.get(&node.id).copied() {
+                if let Some(first) = self.seen.get(&node.id).copied() {
                     if self.reserve() {
                         let mut diagnostic = indexed_diagnostic(
                             "duplicate-subscription-entry",

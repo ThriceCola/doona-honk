@@ -3,8 +3,8 @@
 use crate::diagnostic::{SettingPath, SourceRef};
 use crate::error::{ConfigError, DetailedConfigError, ErrorCategory};
 use crate::node::{
-    Hysteria2Config, Node, OutboundConfig, QuicOptions, Udp443Policy, VlessConfig, VlessMultiplex,
-    VlessUdpEncoding,
+    Hysteria2Config, Node, OutboundConfig, QuicOptions, ShadowsocksPlugin, Udp443Policy,
+    VlessConfig, VlessMultiplex, VlessUdpEncoding,
 };
 use crate::options::vocab::{
     coalesce_equal, optional_flow, optional_text, verification_text, vmess_cipher,
@@ -425,22 +425,25 @@ pub(super) fn apply_protocol(
     }
     match &mut node.outbound {
         OutboundConfig::Shadowsocks(config) => {
-            if let Some(value) = query.get("plugin") {
-                if let Some((name, options)) = value.split_once(';') {
-                    config.plugin = Some(name.to_string());
-                    if !options.is_empty() {
-                        config.plugin_opts = Some(options.to_string());
-                    }
-                } else {
-                    config.plugin = Some(value.clone());
-                }
-            }
-            if let Some(value) = query
+            let options = query
                 .get("plugin-opts")
                 .or_else(|| query.get("plugin_opts"))
-            {
-                config.plugin_opts = Some(value.clone());
-            }
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty());
+            config.plugin = match query.get("plugin").map(|value| value.trim()) {
+                Some(name) if !name.is_empty() => Some(
+                    ShadowsocksPlugin::parse(name, options)
+                        .map_err(|reason| super::plugin_error(source, "plugin", reason))?,
+                ),
+                _ if options.is_some() => {
+                    return Err(super::plugin_error(
+                        source,
+                        "plugin_opts",
+                        "Shadowsocks plugin options require a plugin",
+                    ));
+                }
+                _ => None,
+            };
         }
         OutboundConfig::Vmess(config) if shadowrocket => {
             config.encryption = vmess_cipher(

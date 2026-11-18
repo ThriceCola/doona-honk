@@ -14,8 +14,8 @@ use crate::types::NodeProtocol;
 
 use super::{
     AnyTlsConfig, Hysteria2Config, JuicityConfig, Node, OutboundConfig, QuicOptions,
-    ShadowsocksConfig, Socks5Config, StreamTransportOptions, TlsOptions, TrojanConfig, TuicConfig,
-    VlessConfig, VlessMultiplex, VlessUdpEncoding, VmessConfig,
+    ShadowsocksConfig, ShadowsocksPlugin, Socks5Config, StreamTransportOptions, TlsOptions,
+    TrojanConfig, TuicConfig, VlessConfig, VlessMultiplex, VlessUdpEncoding, VmessConfig,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -579,12 +579,35 @@ impl FlatNode {
         self.sni = self.sni.take().filter(|value| !value.trim().is_empty());
         let mut flat = self;
         let outbound = match flat.protocol {
-            NodeProtocol::SS => OutboundConfig::Shadowsocks(ShadowsocksConfig {
-                password: flat.password.take(),
-                encryption: flat.encryption.take(),
-                plugin: flat.plugin.take(),
-                plugin_opts: flat.plugin_opts.take(),
-            }),
+            NodeProtocol::SS => {
+                let plugin = match flat.plugin.take().filter(|name| !name.trim().is_empty()) {
+                    Some(name) => Some(
+                        ShadowsocksPlugin::parse(&name, flat.plugin_opts.take().as_deref())
+                            .map_err(|reason| {
+                                semantic_error(source, setting.clone().field("plugin"), reason)
+                            })?,
+                    ),
+                    None => {
+                        if flat
+                            .plugin_opts
+                            .take()
+                            .is_some_and(|options| !options.trim().is_empty())
+                        {
+                            return Err(semantic_error(
+                                source,
+                                setting.clone().field("plugin_opts"),
+                                "Shadowsocks plugin options require a plugin",
+                            ));
+                        }
+                        None
+                    }
+                };
+                OutboundConfig::Shadowsocks(ShadowsocksConfig {
+                    password: flat.password.take(),
+                    encryption: flat.encryption.take(),
+                    plugin,
+                })
+            }
             NodeProtocol::Trojan => {
                 let transport = flat.take_transport();
                 let tls = flat.take_tls();
@@ -733,8 +756,8 @@ struct WireOptions<'a> {
     packet_encoding: Option<VlessUdpEncoding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     multiplex: Option<&'a VlessMultiplex>,
-    plugin: Option<&'a str>,
-    plugin_opts: Option<&'a str>,
+    plugin: Option<String>,
+    plugin_opts: Option<String>,
     transport: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     xhttp: Option<&'a super::XhttpOptions>,
@@ -833,8 +856,11 @@ impl<'a> WireOptions<'a> {
             OutboundConfig::Shadowsocks(config) => {
                 wire.password = config.password.as_deref();
                 wire.encryption = config.encryption.as_deref();
-                wire.plugin = config.plugin.as_deref();
-                wire.plugin_opts = config.plugin_opts.as_deref();
+                if let Some(plugin) = config.plugin.as_ref() {
+                    let (name, options) = plugin.flat_wire();
+                    wire.plugin = Some(name.to_string());
+                    wire.plugin_opts = options;
+                }
             }
             OutboundConfig::Trojan(config) => {
                 wire.username = config.password.as_deref();

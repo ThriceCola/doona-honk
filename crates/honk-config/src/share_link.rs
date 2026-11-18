@@ -181,6 +181,22 @@ fn invalid_link(source: &SourceRef) -> DetailedConfigError {
     )
 }
 
+/// A SIP003 plugin claim the link cannot carry: reported against the setting
+/// that produced it, not as a generic invalid link.
+fn plugin_error(
+    source: &SourceRef,
+    field: &'static str,
+    reason: &'static str,
+) -> DetailedConfigError {
+    DetailedConfigError::new(
+        ErrorCategory::Validation,
+        "invalid-config-value",
+        source.clone(),
+        SettingPath::new("nodes").field(field),
+        reason,
+    )
+}
+
 fn node_from_url(url: &url::Url, source: &SourceRef) -> Result<Node, DetailedConfigError> {
     let outbound = match url.scheme() {
         "socks5" | "socks4" | "socks4a" => OutboundConfig::Socks5(Default::default()),

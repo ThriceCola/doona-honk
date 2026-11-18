@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine as _;
+use honk_config::node::{ShadowsocksObfs, ShadowsocksObfsMode, ShadowsocksPlugin};
 use honk_config::types::NodeProtocol;
 use sha2::{Digest as _, Sha256};
 
@@ -305,8 +306,11 @@ fn test_parse_subscription_keeps_valid_sibling_after_intrinsic_rejection() {
     assert!(matches!(error, honk_config::ConfigError::Validation(_)));
 }
 
+/// The plug-in shape is part of the node now: a provider's `obfs` entries are
+/// admitted (a whole body of them used to be rejected), while a plugin honk
+/// does not implement is still skipped entry by entry.
 #[test]
-fn test_parse_subscription_skips_proxy_plugins() {
+fn test_parse_subscription_admits_simple_obfs_and_skips_unknown_plugins() {
     let clash = Subscription {
         sub_type: SubscriptionType::Clash,
         ..Default::default()
@@ -324,6 +328,15 @@ fn test_parse_subscription_skips_proxy_plugins() {
     plugin-opts:
       mode: http
       host: mask.example
+  - name: unknown-plugin
+    type: ss
+    server: other.example
+    port: 8388
+    cipher: aes-128-gcm
+    password: secret
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket
   - name: plain
     type: socks5
     server: 127.0.0.1
@@ -331,8 +344,16 @@ fn test_parse_subscription_skips_proxy_plugins() {
 "#,
     )
     .unwrap();
-    assert_eq!(clash_nodes.len(), 1);
-    assert_eq!(clash_nodes[0].name, "plain");
+    let names: Vec<&str> = clash_nodes.iter().map(|node| node.name.as_str()).collect();
+    assert_eq!(names, ["obfs", "plain"]);
+    assert_eq!(
+        clash_nodes[0].shadowsocks().unwrap().plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Http,
+            host: Some("mask.example".into()),
+            path: None,
+        }))
+    );
 
     let simple = Subscription {
         sub_type: SubscriptionType::Simple,
@@ -346,8 +367,93 @@ fn test_parse_subscription_skips_proxy_plugins() {
         ),
     )
     .unwrap();
-    assert_eq!(simple_nodes.len(), 1);
-    assert_eq!(simple_nodes[0].name, "plain");
+    let names: Vec<&str> = simple_nodes.iter().map(|node| node.name.as_str()).collect();
+    assert_eq!(names, ["obfs", "plain"]);
+    assert!(simple_nodes[0].shadowsocks().unwrap().plugin.is_some());
+}
+
+/// One provider entry, four dialects. The typed plugin and the node identity
+/// must not depend on which one carried it; the identity is recomputed from the
+/// documented material, so a divergent adapter shows up here.
+#[test]
+fn simple_obfs_entry_is_identical_across_dialects() {
+    let clash = parse_subscription_content(
+        &Subscription {
+            sub_type: SubscriptionType::Clash,
+            ..Default::default()
+        },
+        r#"proxies:
+  - name: ss
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: pass
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: mask.example
+"#,
+    )
+    .unwrap();
+    let sip008 = parse_subscription_content(
+        &Subscription {
+            sub_type: SubscriptionType::Sip008,
+            ..Default::default()
+        },
+        r#"{"version":1,"servers":[{"remarks":"ss","server":"1.2.3.4","server_port":8388,
+           "method":"aes-256-gcm","password":"pass","plugin":"obfs-local",
+           "plugin_opts":"obfs=http;obfs-host=mask.example"}]}"#,
+    )
+    .unwrap();
+    let records = parse_subscription_content(
+        &Subscription {
+            sub_type: SubscriptionType::Simple,
+            ..Default::default()
+        },
+        "ss = ss, 1.2.3.4, 8388, encrypt-method=aes-256-gcm, password=pass, obfs=http, obfs-host=mask.example\n",
+    )
+    .unwrap();
+    let link = Node::from_share_link(
+        "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dmask.example#ss",
+    )
+    .unwrap();
+
+    let expected_plugin = Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+        mode: ShadowsocksObfsMode::Http,
+        host: Some("mask.example".into()),
+        path: None,
+    }));
+    for node in [&clash[0], &sip008[0], &records[0], &link] {
+        assert_eq!(node.shadowsocks().unwrap().plugin, expected_plugin);
+        assert_eq!(
+            node.id.to_string(),
+            "0999b0f6-b1c4-5053-a8ff-633401820028",
+            "{} carried a different dial shape",
+            node.name
+        );
+    }
+}
+
+/// The Surge-family record form carries the plugin as a SIP003 string too.
+#[test]
+fn record_plugin_string_maps_to_the_same_shape() {
+    let nodes = parse_subscription_content(
+        &Subscription {
+            sub_type: SubscriptionType::Simple,
+            ..Default::default()
+        },
+        "ss = ss, 1.2.3.4, 8388, encrypt-method=aes-256-gcm, password=pass, plugin=obfs-local;obfs=tls;obfs-host=cdn.example\n",
+    )
+    .unwrap();
+    assert_eq!(
+        nodes[0].shadowsocks().unwrap().plugin,
+        Some(ShadowsocksPlugin::Obfs(ShadowsocksObfs {
+            mode: ShadowsocksObfsMode::Tls,
+            host: Some("cdn.example".into()),
+            path: None,
+        }))
+    );
 }
 
 #[tokio::test]

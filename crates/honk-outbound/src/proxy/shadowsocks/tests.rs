@@ -763,3 +763,347 @@ async fn shared_source_dispatch_builds_a_shadowsocks_association() {
         .unwrap();
     assert!(n > b"hi".len());
 }
+
+fn obfs_node(addr: SocketAddr, mode: honk_config::node::ShadowsocksObfsMode) -> Node {
+    Node {
+        name: "test-ss-obfs".into(),
+        address: addr.ip().to_string(),
+        port: addr.port(),
+        outbound: honk_config::node::OutboundConfig::Shadowsocks(
+            honk_config::node::ShadowsocksConfig {
+                encryption: Some("aes-128-gcm".into()),
+                password: Some("test-password".into()),
+                plugin: Some(honk_config::node::ShadowsocksPlugin::Obfs(
+                    honk_config::node::ShadowsocksObfs {
+                        mode,
+                        host: Some("cdn.example".into()),
+                        path: None,
+                    },
+                )),
+            },
+        ),
+        ..Default::default()
+    }
+}
+
+/// Read the obfs HTTP request with an independent decoder and return the
+/// ciphertext the request body carries.
+async fn read_obfs_http_request(sock: &mut TcpStream) -> (String, Vec<u8>) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = sock.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "client closed inside the obfs request header");
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(position) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8(buf[..position].to_vec()).unwrap();
+            return (head, buf[position + 4..].to_vec());
+        }
+        assert!(buf.len() < 8192, "unterminated obfs request header");
+    }
+}
+
+/// Walk the fake ClientHello by its own length fields and return the session
+/// ticket payload: the first Shadowsocks ciphertext.
+async fn read_obfs_tls_hello(sock: &mut TcpStream) -> Vec<u8> {
+    let mut header = [0u8; 5];
+    sock.read_exact(&mut header).await.unwrap();
+    assert_eq!(&header[..3], &[0x16, 0x03, 0x01], "handshake record");
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut body = vec![0u8; len];
+    sock.read_exact(&mut body).await.unwrap();
+    let mut cursor = 4 + 2 + 32;
+    cursor += 1 + body[cursor] as usize;
+    let suites = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
+    cursor += 2 + suites;
+    cursor += 1 + body[cursor] as usize;
+    let extensions = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
+    cursor += 2;
+    assert_eq!(body.len() - cursor, extensions, "extension length is exact");
+    assert_eq!(
+        &body[cursor..cursor + 2],
+        &[0x00, 0x23],
+        "session ticket first"
+    );
+    let ticket = u16::from_be_bytes([body[cursor + 2], body[cursor + 3]]) as usize;
+    body[cursor + 4..cursor + 4 + ticket].to_vec()
+}
+
+/// Framing the reference simple-obfs server puts in front of its first response
+/// record: a fixed 96-byte ServerHello and a 6-byte ChangeCipherSpec.
+const SERVER_HELLO_PREFIX: [u8; 102] = {
+    let mut prefix = [0u8; 102];
+    prefix[0] = 0x16;
+    prefix[1] = 0x03;
+    prefix[2] = 0x01;
+    prefix[3] = 0x00;
+    prefix[4] = 0x5b;
+    prefix[96] = 0x14;
+    prefix[97] = 0x03;
+    prefix[98] = 0x03;
+    prefix[99] = 0x00;
+    prefix[100] = 0x01;
+    prefix[101] = 0x01;
+    prefix
+};
+
+/// Server side of the obfs envelope: an HTTP response header once, or the fake
+/// ServerHello followed by TLS records.
+async fn obfs_send(
+    sock: &mut TcpStream,
+    mode: honk_config::node::ShadowsocksObfsMode,
+    first: &mut bool,
+    bytes: &[u8],
+) {
+    let mut out = Vec::with_capacity(bytes.len() + 512);
+    match mode {
+        honk_config::node::ShadowsocksObfsMode::Http => {
+            if *first {
+                out.extend_from_slice(
+                    b"HTTP/1.1 200 OK\r\nServer: obfs\r\nConnection: keep-alive\r\n\r\n",
+                );
+            }
+            out.extend_from_slice(bytes);
+        }
+        honk_config::node::ShadowsocksObfsMode::Tls => {
+            for (index, chunk) in bytes.chunks(16 * 1024).enumerate() {
+                if *first && index == 0 {
+                    out.extend_from_slice(&SERVER_HELLO_PREFIX);
+                    out.extend_from_slice(&[0x16, 0x03, 0x03]);
+                } else {
+                    out.extend_from_slice(&[0x17, 0x03, 0x03]);
+                }
+                out.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+                out.extend_from_slice(chunk);
+            }
+        }
+    }
+    *first = false;
+    sock.write_all(&out).await.unwrap();
+}
+
+/// Stand-in simple-obfs + Shadowsocks server: the carried bytes start the SS
+/// stream (salt + sealed request header), every later payload chunk echoes back
+/// uppercased.
+async fn serve_ss_echo(
+    mut sock: TcpStream,
+    carried: Vec<u8>,
+    mode: honk_config::node::ShadowsocksObfsMode,
+) {
+    let method = "aes-128-gcm";
+    let conf = CipherConf::for_method(method).unwrap();
+    let master = ShadowsocksHandler::master_key("test-password", conf.key_len);
+
+    assert!(
+        carried.len() > conf.salt_len,
+        "the carrier starts the SS stream"
+    );
+    let salt = carried[..conf.salt_len].to_vec();
+    let mut window = vec![0u8; 64 * 1024];
+    let mut filled = carried.len() - conf.salt_len;
+    window[..filled].copy_from_slice(&carried[conf.salt_len..]);
+    let mut c2s_subkey = vec![0u8; conf.key_len];
+    hkdf_sha1_derive(&master, &salt, &mut c2s_subkey);
+    let c2s_cipher = AeadCipher::new(method, &c2s_subkey).unwrap();
+    let mut c2s_nonce = vec![0u8; conf.nonce_len];
+    let mut pending_len = None;
+
+    let mut s2c_salt = vec![0u8; conf.salt_len];
+    rand::rng().fill_bytes(&mut s2c_salt);
+    let mut first = true;
+    obfs_send(&mut sock, mode, &mut first, &s2c_salt).await;
+    let mut s2c_subkey = vec![0u8; conf.key_len];
+    hkdf_sha1_derive(&master, &s2c_salt, &mut s2c_subkey);
+    let s2c_cipher = AeadCipher::new(method, &s2c_subkey).unwrap();
+    let mut s2c_nonce = vec![0u8; conf.nonce_len];
+
+    // The request header is one IPv4 address and port: 1 + 4 + 2 bytes.
+    let mut skip = 7usize;
+    let mut carried = None;
+    loop {
+        let (out_len, rest) = decrypt_chunks_in_place(
+            &c2s_cipher,
+            &mut c2s_nonce,
+            &mut pending_len,
+            &mut window,
+            filled,
+            conf.tag_len,
+        )
+        .unwrap();
+        if out_len > 0 {
+            let start = skip.min(out_len);
+            skip -= start;
+            if start < out_len {
+                let reply: Vec<u8> = window[start..out_len]
+                    .iter()
+                    .map(|byte| byte.to_ascii_uppercase())
+                    .collect();
+                let mut sealed = Vec::new();
+                seal_chunks_into(&s2c_cipher, &mut s2c_nonce, &reply, &mut sealed).unwrap();
+                obfs_send(&mut sock, mode, &mut first, &sealed).await;
+            }
+        }
+        if rest > 0 {
+            window.copy_within(out_len..out_len + rest, 0);
+        }
+        filled = rest;
+        let next = match carried.take() {
+            Some(next) => next,
+            None => match read_carrier(&mut sock, mode).await {
+                Some(next) => next,
+                None => return,
+            },
+        };
+        assert!(filled + next.len() <= window.len());
+        window[filled..filled + next.len()].copy_from_slice(&next);
+        filled += next.len();
+    }
+}
+
+/// Read the next de-framed carrier bytes: raw for HTTP mode, one TLS record for
+/// TLS mode. `None` means the client closed.
+async fn read_carrier(
+    sock: &mut TcpStream,
+    mode: honk_config::node::ShadowsocksObfsMode,
+) -> Option<Vec<u8>> {
+    match mode {
+        honk_config::node::ShadowsocksObfsMode::Http => {
+            let mut chunk = vec![0u8; 32 * 1024];
+            let n = sock.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return None;
+            }
+            chunk.truncate(n);
+            Some(chunk)
+        }
+        honk_config::node::ShadowsocksObfsMode::Tls => {
+            let mut header = [0u8; 5];
+            if sock.read_exact(&mut header).await.is_err() {
+                return None;
+            }
+            assert_eq!(&header[..3], &[0x17, 0x03, 0x03], "application data record");
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut payload = vec![0u8; len];
+            sock.read_exact(&mut payload).await.unwrap();
+            Some(payload)
+        }
+    }
+}
+
+/// End-to-end over real loopback: the HTTP obfs envelope carries the first SS
+/// ciphertext, the stand-in strips it, and data flows both ways.
+#[tokio::test]
+async fn test_dial_tcp_through_simple_obfs_http() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (head, carried) = read_obfs_http_request(&mut sock).await;
+        let _ = head_tx.send(head);
+        serve_ss_echo(sock, carried, honk_config::node::ShadowsocksObfsMode::Http).await;
+    });
+
+    let node = obfs_node(server_addr, honk_config::node::ShadowsocksObfsMode::Http);
+    let handler = ShadowsocksHandler::new();
+    let target: SocketAddr = "93.184.216.34:80".parse().unwrap();
+    let mut stream = handler
+        .dial(&node, target, None, std::time::Duration::from_secs(3))
+        .await
+        .unwrap();
+    stream.stream.write_all(b"hello-obfs").await.unwrap();
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.stream.read_exact(&mut reply),
+    )
+    .await
+    .expect("obfs echo timed out")
+    .unwrap();
+    assert_eq!(&reply, b"HELLO-OBFS");
+
+    let head = tokio::time::timeout(std::time::Duration::from_secs(5), head_rx)
+        .await
+        .expect("request capture timed out")
+        .unwrap();
+    assert_eq!(
+        head.split("\r\n").next(),
+        Some("GET / HTTP/1.1"),
+        "request line: {head}"
+    );
+    assert!(
+        head.contains(&format!("Host: cdn.example:{}\r\n", server_addr.port())),
+        "host header: {head}"
+    );
+    assert!(head.contains("Upgrade: websocket\r\n"), "upgrade: {head}");
+}
+
+/// The TLS obfs mode carries the same first SS ciphertext inside the fake
+/// ClientHello's session ticket.
+#[tokio::test]
+async fn test_dial_tcp_through_simple_obfs_tls() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let carried = read_obfs_tls_hello(&mut sock).await;
+        serve_ss_echo(sock, carried, honk_config::node::ShadowsocksObfsMode::Tls).await;
+    });
+
+    let node = obfs_node(server_addr, honk_config::node::ShadowsocksObfsMode::Tls);
+    let handler = ShadowsocksHandler::new();
+    let target: SocketAddr = "93.184.216.34:80".parse().unwrap();
+    let mut stream = handler
+        .dial(&node, target, None, std::time::Duration::from_secs(3))
+        .await
+        .unwrap();
+    stream.stream.write_all(b"hello-obfs").await.unwrap();
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.stream.read_exact(&mut reply),
+    )
+    .await
+    .expect("obfs echo timed out")
+    .unwrap();
+    assert_eq!(&reply, b"HELLO-OBFS");
+}
+
+/// simple-obfs obfuscates TCP only: the UDP path still sends plain Shadowsocks
+/// datagrams to the server address, exactly as before the plugin existed.
+#[tokio::test]
+async fn obfs_node_udp_stays_plain_shadowsocks() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server.local_addr().unwrap();
+    let server_crypto = LegacyUdpCrypto::new("aes-128-gcm", "test-password").unwrap();
+
+    let node = obfs_node(server_addr, honk_config::node::ShadowsocksObfsMode::Http);
+    let handler = ShadowsocksHandler::new();
+    let target: SocketAddr = "8.8.8.8:53".parse().unwrap();
+    let transport = handler
+        .dial_udp_transport(&node, target, None, std::time::Duration::from_secs(3))
+        .await
+        .unwrap();
+    let sent = tokio::spawn(async move {
+        transport.send_packet(b"question").await.unwrap();
+    });
+
+    let mut buf = [0u8; 65536];
+    let (n, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        server.recv_from(&mut buf),
+    )
+    .await
+    .expect("udp datagram timed out")
+    .unwrap();
+    let datagram = server_crypto
+        .open(&buf[..n])
+        .expect("a plain Shadowsocks datagram, not an obfs request");
+    assert_eq!(
+        datagram.peer,
+        addr::SocksAddr::new(target, None).unwrap(),
+        "the reply names the destination, not an obfs endpoint"
+    );
+    assert_eq!(datagram.payload(), b"question");
+    sent.await.unwrap();
+}

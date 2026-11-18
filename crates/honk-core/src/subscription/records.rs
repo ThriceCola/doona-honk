@@ -232,6 +232,49 @@ fn consume_record_controls(protocol: &str, options: &mut RecordOptions) -> Recor
     Ok(())
 }
 
+/// Map the Surge-family Shadowsocks obfuscation keys into the shared Clash
+/// vocabulary: `obfs`/`obfs-host`/`obfs-uri` and a SIP003 `plugin` string both
+/// become `plugin` + `plugin-opts`, so one converter owns the option rules.
+fn apply_records_obfs(
+    map: &mut Mapping,
+    dialect: Dialect,
+    options: &mut RecordOptions,
+) -> RecordResult<()> {
+    let plugin = take_option(options, &["plugin"]);
+    let plugin_opts = take_option(options, &["plugin-opts", "plugin_opts"]);
+    let obfs = take_option(options, &["obfs"]).filter(|value| match dialect {
+        Dialect::Named => !matches!(value.to_ascii_lowercase().as_str(), "none" | "tcp"),
+        Dialect::QuantumultX => !value.eq_ignore_ascii_case("none"),
+    });
+    match (plugin, obfs) {
+        (Some(_), Some(_)) => Err("record plugin and obfs conflict"),
+        (Some(plugin), None) => {
+            put_str(map, "plugin", plugin);
+            set_optional(map, "plugin-opts", plugin_opts);
+            Ok(())
+        }
+        (None, Some(obfs)) => {
+            put_str(map, "plugin", "obfs");
+            let mut stated = Mapping::new();
+            put_str(&mut stated, "mode", obfs);
+            if let Some(host) = take_option(options, &["obfs-host", "host"]) {
+                put_str(&mut stated, "host", host);
+            }
+            if let Some(path) = take_option(options, &["obfs-uri", "obfs-path", "path"]) {
+                put_str(&mut stated, "path", path);
+            }
+            map.insert(Value::String("plugin-opts".into()), Value::Mapping(stated));
+            Ok(())
+        }
+        (None, None) => {
+            if plugin_opts.is_some() {
+                return Err("Shadowsocks plugin options require a plugin");
+            }
+            Ok(())
+        }
+    }
+}
+
 fn apply_udp_options(map: &mut Mapping, options: &mut RecordOptions) -> RecordResult<()> {
     if let Some(enabled) = take_bool_alias(options, &["udp", "udp-relay"])? {
         put_bool(map, "udp", enabled);
@@ -358,19 +401,7 @@ fn apply_protocol(
             });
             set_required(map, "cipher", cipher)?;
             set_required(map, "password", password)?;
-            if take_any_active(options, &["plugin", "plugin-opts", "plugin_opts"]) {
-                return Err("Shadowsocks plugins are unsupported");
-            }
-            if let Some(obfs) = take_raw(options, &["obfs"])
-                && match dialect {
-                    Dialect::Named => !obfs.trim().is_empty(),
-                    Dialect::QuantumultX => {
-                        !obfs.trim().is_empty() && !obfs.eq_ignore_ascii_case("none")
-                    }
-                }
-            {
-                return Err("Shadowsocks obfuscation is unsupported");
-            }
+            apply_records_obfs(map, dialect, options)?;
         }
         "socks5" => {
             let username = take_credential_alias(options, &["username"])?.or_else(|| {

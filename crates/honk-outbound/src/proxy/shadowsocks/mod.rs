@@ -26,18 +26,19 @@
 //! <https://shadowsocks.org/doc/sip022.html>
 
 mod aead2022;
+mod obfs;
 mod stream;
 
 use async_trait::async_trait;
 use hkdf::Hkdf;
-use honk_config::node::Node;
+use honk_config::node::{Node, ShadowsocksConfig, ShadowsocksPlugin};
 use rand::Rng;
 use sha1::Sha1;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::debug;
 
@@ -47,11 +48,42 @@ use super::{
     ProxyStream, SharedSourceOutbound, TcpOutbound,
 };
 use aead2022::{Ss2022Method, Ss2022UdpSession};
+use stream::{SsTransport, SsWrite};
 
 pub(crate) const SS_SUBKEY_INFO: &[u8] = b"ss-subkey";
 pub(crate) const CHUNK_MAX_LEN: usize = 0x3FFF; // 2^14 - 1
 // The UDP wire-length bound includes address headers, padding, and AEAD tags.
 const UDP_PACKET_BUFFER_SIZE: usize = u16::MAX as usize + 1;
+
+/// The one-shot request a dial sends: the encoded target address plus what the
+/// returned stream must report back as its destination.
+struct SsRequest {
+    header: Vec<u8>,
+    target: SocketAddr,
+    target_domain: Option<String>,
+}
+
+impl SsRequest {
+    fn new(target: SocketAddr, target_domain: Option<&str>) -> anyhow::Result<Self> {
+        Ok(Self {
+            header: addr::encode_address(target, target_domain)?,
+            target,
+            target_domain: target_domain.map(str::to_string),
+        })
+    }
+}
+
+/// A plugin honk cannot carry must fail before the connection is made:
+/// dialing plain Shadowsocks at an obfuscated server only surfaces later as an
+/// unexplained cipher error.
+fn ensure_plugin_supported(config: &ShadowsocksConfig) -> anyhow::Result<()> {
+    match config.plugin.as_ref() {
+        Some(ShadowsocksPlugin::Unsupported(name)) => {
+            anyhow::bail!("unsupported Shadowsocks plugin {name:?}")
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Whether `method` names a Shadowsocks 2022 (SIP022) cipher.
 pub(crate) fn is_2022_method(method: &str) -> bool {
@@ -334,27 +366,28 @@ impl ShadowsocksHandler {
         key
     }
 
-    /// Shared dial tail: run the cipher-family prologue on the connected
-    /// socket and return the inline codec stream (no relay task).
-    async fn start_relay(
+    /// Shared dial tail: run the cipher-family prologue over the connected
+    /// carrier and return the inline codec stream (no relay task).
+    async fn start_relay<W, R>(
         &self,
         method: &str,
         password: &str,
-        server: TcpStream,
-        header: Vec<u8>,
-        target: SocketAddr,
-        target_domain: Option<&str>,
-    ) -> anyhow::Result<ProxyStream> {
+        mut transport: SsTransport<W, R>,
+        request: SsRequest,
+    ) -> anyhow::Result<ProxyStream>
+    where
+        W: SsWrite + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
+    {
         crate::runtime::flow_observation::milestone(
             crate::runtime::flow_observation::Milestone::TransportReady,
         );
         let stream: Box<dyn super::AsyncReadWrite> = if is_2022_method(method) {
             let method_2022 = Ss2022Method::new(method, password)?;
-            Box::new(aead2022::dial_stream(server, method_2022, header).await?)
+            Box::new(aead2022::dial_stream(transport, method_2022, request.header).await?)
         } else {
             let conf = CipherConf::for_method(method)?;
             let master_key = Self::master_key(password, conf.key_len);
-            let mut server = server;
 
             // Legacy prologue: send salt and the header chunk, then return.
             // The response salt is read from the read path (2022 parity) —
@@ -365,10 +398,28 @@ impl ShadowsocksHandler {
             let mut send_subkey = vec![0u8; conf.key_len];
             hkdf_sha1_derive(&master_key, &send_salt, &mut send_subkey);
             let send_cipher = AeadCipher::new(method, &send_subkey)?;
-            server.write_all(&send_salt).await?;
 
             let mut send_nonce = vec![0u8; conf.nonce_len];
-            stream::write_all_sealed(&mut server, &send_cipher, &mut send_nonce, &header).await?;
+            // A plugin rewrites the first bytes it sees, so salt and header
+            // must leave in one write to share one envelope. A plain node keeps
+            // its two writes.
+            if W::REWRITES_FIRST_WRITE {
+                let mut sealed = Vec::with_capacity(request.header.len() + 4096);
+                seal_chunks_into(&send_cipher, &mut send_nonce, &request.header, &mut sealed)?;
+                let mut request = Vec::with_capacity(send_salt.len() + sealed.len());
+                request.extend_from_slice(&send_salt);
+                request.extend_from_slice(&sealed);
+                transport.write.write_all(&request).await?;
+            } else {
+                transport.write.write_all(&send_salt).await?;
+                stream::write_all_sealed(
+                    &mut transport.write,
+                    &send_cipher,
+                    &mut send_nonce,
+                    &request.header,
+                )
+                .await?;
+            }
 
             let prologue = stream::LegacyPrologue {
                 conf,
@@ -376,7 +427,7 @@ impl ShadowsocksHandler {
                 method: method.to_string(),
             };
             Box::new(stream::SsStream::new_legacy(
-                server,
+                transport,
                 send_cipher,
                 send_nonce,
                 prologue,
@@ -387,9 +438,41 @@ impl ShadowsocksHandler {
         );
         Ok(ProxyStream {
             stream,
-            target_addr: target,
-            target_domain: target_domain.map(|s| s.to_string()),
+            target_addr: request.target,
+            target_domain: request.target_domain,
         })
+    }
+
+    /// Wrap the connected socket in the node's plugin, if it declares one, and
+    /// run the cipher prologue over it.
+    ///
+    /// The plugin sits *under* the cipher — it carries Shadowsocks ciphertext
+    /// and never sees plaintext — so both halves are wrapped before the salt
+    /// and header chunk are written.
+    async fn relay_over(
+        &self,
+        node: &Node,
+        server: TcpStream,
+        method: &str,
+        password: &str,
+        request: SsRequest,
+    ) -> anyhow::Result<ProxyStream> {
+        match node.shadowsocks().and_then(|config| config.plugin.as_ref()) {
+            Some(ShadowsocksPlugin::Obfs(obfs_config)) => {
+                let plan = obfs::Plan::new(obfs_config, node.host(), node.port);
+                let (read, write) = server.into_split();
+                let carrier = SsTransport {
+                    write: obfs::Writer::new(write, plan.clone()),
+                    read: obfs::Reader::new(read, &plan),
+                };
+                self.start_relay(method, password, carrier, request).await
+            }
+            _ => {
+                let (read, write) = server.into_split();
+                self.start_relay(method, password, SsTransport { write, read }, request)
+                    .await
+            }
+        }
     }
 }
 
@@ -411,13 +494,14 @@ impl TcpOutbound for ShadowsocksHandler {
         } else {
             CipherConf::for_method(method)?;
         }
+        ensure_plugin_supported(config)?;
 
         let addr = format!("{}:{}", node.host(), node.port);
         debug!("Shadowsocks: connecting to {} for target {}", addr, target);
         let server = crate::util::connect_outbound(&addr, connect_timeout).await?;
 
-        let header = addr::encode_address(target, target_domain)?;
-        self.start_relay(method, password, server, header, target, target_domain)
+        let request = SsRequest::new(target, target_domain)?;
+        self.relay_over(node, server, method, password, request)
             .await
     }
 
@@ -432,8 +516,9 @@ impl TcpOutbound for ShadowsocksHandler {
         let config = node.shadowsocks().unwrap();
         let method = config.encryption.as_deref().unwrap_or("aes-128-gcm");
         let password = config.password.as_deref().unwrap_or("");
-        let header = addr::encode_address(target, target_domain)?;
-        self.start_relay(method, password, server, header, target, target_domain)
+        ensure_plugin_supported(config)?;
+        let request = SsRequest::new(target, target_domain)?;
+        self.relay_over(node, server, method, password, request)
             .await
     }
 }

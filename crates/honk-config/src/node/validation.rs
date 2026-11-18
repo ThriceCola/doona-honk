@@ -193,6 +193,11 @@ impl Node {
     }
 
     fn validate_protocol_inner(&self) -> Result<(), ValidationFailure> {
+        if let Some(plugin) = self.shadowsocks().and_then(|config| config.plugin.as_ref()) {
+            plugin
+                .validate()
+                .map_err(|(field, message)| ValidationFailure::new(Some(field), message))?;
+        }
         if let Some(transport) = self.transport() {
             transport
                 .check()

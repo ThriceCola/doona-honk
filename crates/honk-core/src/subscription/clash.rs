@@ -4,7 +4,7 @@ mod fields;
 pub(super) mod options;
 mod xhttp;
 
-use honk_config::node::{Node, OutboundConfig};
+use honk_config::node::{Node, OutboundConfig, ShadowsocksPlugin};
 use honk_config::options::vocab::{optional_flow, packet_network, xhttp_stream_transport};
 use honk_config::types::NodeProtocol;
 use serde_yaml::Mapping;
@@ -135,8 +135,8 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
     reject_active_unless(
         mapping,
         &["plugin", "plugin-opts", "plugin_opts"],
-        false,
-        "proxy plugins are unsupported",
+        protocol == NodeProtocol::SS,
+        "proxy plugins are unsupported for this protocol",
     )?;
     if !supports_tls(protocol)
         && has_active_for_key(
@@ -310,6 +310,7 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
         OutboundConfig::Shadowsocks(config) => {
             config.password = password;
             config.encryption = cipher;
+            config.plugin = shadowsocks_plugin(mapping)?;
         }
         OutboundConfig::Socks5(config) => {
             config.username = username;
@@ -379,6 +380,58 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
     }
     Ok(())
 }
+/// Read the Clash `plugin`/`plugin-opts` pair into the typed plugin.
+///
+/// Clash carries the options as a mapping while SIP008 and sing-box bodies
+/// normalize to the SIP003 option string, so both shapes reach the one
+/// converter. Unknown option keys are rejected rather than dropped: a node whose
+/// obfs settings were half-read would dial the wrong wire shape.
+fn shadowsocks_plugin(mapping: &Mapping) -> Result<Option<ShadowsocksPlugin>, &'static str> {
+    let options = yaml_alias(mapping, &["plugin-opts", "plugin_opts"])?;
+    let name = optional_text_alias(mapping, &["plugin"])?;
+    let options = match options {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(serde_yaml::Value::String(options)) => Some(options.clone()),
+        Some(serde_yaml::Value::Mapping(options)) => Some(obfs_option_string(options)?),
+        Some(_) => return Err("Shadowsocks plugin options must be a mapping or a string"),
+    };
+    let Some(name) = name else {
+        if options
+            .as_deref()
+            .is_some_and(|options| !options.is_empty())
+        {
+            return Err("Shadowsocks plugin options require a plugin");
+        }
+        return Ok(None);
+    };
+    ShadowsocksPlugin::parse(&name, options.as_deref()).map(Some)
+}
+
+/// Render Clash's option mapping as the SIP003 `key=value;...` string so one
+/// parser owns the option vocabulary.
+fn obfs_option_string(options: &Mapping) -> Result<String, &'static str> {
+    let mut spec = String::new();
+    for (key, value) in options {
+        let serde_yaml::Value::String(key) = key else {
+            return Err("Shadowsocks plugin option names must be strings");
+        };
+        let Some(value) = yaml_text(value)? else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if !spec.is_empty() {
+            spec.push(';');
+        }
+        spec.push_str(key.trim());
+        spec.push('=');
+        spec.push_str(value);
+    }
+    Ok(spec)
+}
+
 fn resolve_anytls_network(
     mapping: &Mapping,
     udp: Option<bool>,

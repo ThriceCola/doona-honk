@@ -4,7 +4,7 @@ use super::headers;
 use super::validation::ValidationFailure;
 use crate::types::NodeProtocol;
 
-use super::{VlessConfig, identity_field};
+use super::{ShadowsocksPlugin, VlessConfig, identity_field};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TlsOptions {
@@ -174,8 +174,9 @@ pub struct QuicOptions {
 pub struct ShadowsocksConfig {
     pub password: Option<String>,
     pub encryption: Option<String>,
-    pub plugin: Option<String>,
-    pub plugin_opts: Option<String>,
+    /// SIP003 plugin carrying the ciphertext. Shapes and normalization live in
+    /// [`ShadowsocksPlugin`].
+    pub plugin: Option<ShadowsocksPlugin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -443,6 +444,14 @@ impl OutboundConfig {
             if !config.tls.enabled && config.tls.reality_public_key.is_none() {
                 fingerprint.push_str("|tls:0");
             }
+        }
+        // Only a node that declares a plugin appends here, so every other
+        // node keeps the identity it had before plugins were modeled.
+        if let Self::Shadowsocks(config) = self
+            && let Some(plugin) = config.plugin.as_ref()
+        {
+            fingerprint.push_str("|ss-plugin:");
+            fingerprint.push_str(&plugin.identity_fingerprint());
         }
         if let Some(options) = transport
             .filter(|transport| transport.is_xhttp())

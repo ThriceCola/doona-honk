@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 
 mod headers;
 mod protocol;
+mod ss_plugin;
 mod validation;
 mod vless;
 mod wire;
 mod xhttp;
 
 pub use protocol::*;
+pub use ss_plugin::*;
 pub use validation::validate_node_collection;
 pub use vless::*;
 pub use wire::NodeSeed;
