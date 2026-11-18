@@ -126,9 +126,11 @@ fn intrinsic_validation_rejects_an_unusable_obfs_shape() {
     );
 }
 
-/// The plugin joins the dial shape. The plain-node UUID is recomputed here from
-/// the documented identity material, so an accidental change to nodes without a
-/// plugin fails too.
+/// The plugin joins the dial shape. Both UUIDs are hard-coded goldens, not
+/// recomputed here: the plain one repeats
+/// `node::tests::test_protocol_identity_goldens` on purpose, so an identity
+/// change to nodes without a plugin fails in this suite too, and the obfs one
+/// was computed from the documented material when the plugin was added.
 #[test]
 fn simple_obfs_shape_joins_node_identity() {
     let plain = Node::from_share_link("ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388#plain").unwrap();

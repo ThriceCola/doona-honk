@@ -373,8 +373,9 @@ fn test_parse_subscription_admits_simple_obfs_and_skips_unknown_plugins() {
 }
 
 /// One provider entry, four dialects. The typed plugin and the node identity
-/// must not depend on which one carried it; the identity is recomputed from the
-/// documented material, so a divergent adapter shows up here.
+/// must not depend on which one carried it. The expected UUID is a hard-coded
+/// golden (the `honk-config` plain-node golden plus this plugin's dial shape),
+/// so a divergent adapter or a changed identity material shows up here.
 #[test]
 fn simple_obfs_entry_is_identical_across_dialects() {
     let clash = parse_subscription_content(
