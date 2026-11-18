@@ -1107,3 +1107,166 @@ async fn obfs_node_udp_stays_plain_shadowsocks() {
     assert_eq!(datagram.payload(), b"question");
     sent.await.unwrap();
 }
+
+/// The 2022 request (salt, EIH, both sealed headers) must leave as one write and
+/// therefore travel inside one obfs envelope. This stand-in strips the envelope
+/// and then speaks the 2022 response header + chunk stream.
+#[tokio::test]
+async fn test_dial_tcp_through_simple_obfs_2022() {
+    use super::aead2022::TAG_LEN;
+
+    let method_name = "2022-blake3-aes-128-gcm";
+    let psk_b64 = "AAECAwQFBgcICQoLDA0ODw==";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (head, carried) = read_obfs_http_request(&mut sock).await;
+        // The envelope must carry the whole request, not a bare salt: the 2022
+        // stream starts inside it.
+        assert!(
+            carried.len() >= 16 + 11 + TAG_LEN,
+            "the envelope carries only {} bytes",
+            carried.len()
+        );
+        let _ = head_tx.send((head, carried.len()));
+        serve_2022_echo(sock, carried, method_name, psk_b64).await;
+    });
+
+    let node = Node {
+        name: "test-ss2022-obfs".into(),
+        address: server_addr.ip().to_string(),
+        port: server_addr.port(),
+        outbound: honk_config::node::OutboundConfig::Shadowsocks(
+            honk_config::node::ShadowsocksConfig {
+                encryption: Some(method_name.into()),
+                password: Some(psk_b64.into()),
+                plugin: Some(honk_config::node::ShadowsocksPlugin::Obfs(
+                    honk_config::node::ShadowsocksObfs {
+                        mode: honk_config::node::ShadowsocksObfsMode::Http,
+                        host: Some("cdn.example".into()),
+                        path: None,
+                    },
+                )),
+            },
+        ),
+        ..Default::default()
+    };
+    let handler = ShadowsocksHandler::new();
+    let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
+    let mut stream = handler
+        .dial(&node, target, None, std::time::Duration::from_secs(3))
+        .await
+        .unwrap();
+    stream.stream.write_all(b"hello ss2022 obfs").await.unwrap();
+    let mut reply = vec![0u8; "hello ss2022 obfs".len()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.stream.read_exact(&mut reply),
+    )
+    .await
+    .expect("2022 obfs echo timed out")
+    .unwrap();
+    assert_eq!(&reply, b"HELLO SS2022 OBFS");
+
+    let (head, carried_len) = tokio::time::timeout(std::time::Duration::from_secs(5), head_rx)
+        .await
+        .expect("request capture timed out")
+        .unwrap();
+    assert_eq!(head.split("\r\n").next(), Some("GET / HTTP/1.1"), "{head}");
+    // A bare salt would be 16 bytes; the 2022 request is salt + two sealed
+    // headers, so the body proves the single-write path reached the envelope.
+    assert!(carried_len > 16, "body was {carried_len} bytes");
+}
+
+/// Stand-in 2022 server: validates the request carried by the envelope, then
+/// echoes uppercase payload chunks with its own response salt and headers.
+async fn serve_2022_echo(
+    sock: TcpStream,
+    carried: Vec<u8>,
+    method_name: &'static str,
+    password: &'static str,
+) {
+    use super::aead2022::{HEADER_TYPE_SERVER, NONCE_LEN, Ss2022Method, TAG_LEN, unix_timestamp};
+
+    let method = Ss2022Method::new(method_name, password).unwrap();
+    let (mut rd, mut wr) = sock.into_split();
+    let mut rd = std::io::Cursor::new(carried).chain(&mut rd);
+
+    let mut salt = vec![0u8; method.key_len];
+    rd.read_exact(&mut salt).await.unwrap();
+    let cipher = method.aead(&method.session_subkey(&salt)).unwrap();
+    let mut nonce = vec![0u8; NONCE_LEN];
+
+    let mut fixed = vec![0u8; 11 + TAG_LEN];
+    rd.read_exact(&mut fixed).await.unwrap();
+    let fixed = cipher.open(&nonce, &fixed).unwrap();
+    increment_nonce(&mut nonce);
+    assert_eq!(fixed[0], 0, "client fixed-header type");
+    let var_len = u16::from_be_bytes([fixed[9], fixed[10]]) as usize;
+    let mut var = vec![0u8; var_len + TAG_LEN];
+    rd.read_exact(&mut var).await.unwrap();
+    let var = cipher.open(&nonce, &var).unwrap();
+    increment_nonce(&mut nonce);
+    assert_eq!(var[0], 1, "IPv4 target address type");
+    let padding_len = u16::from_be_bytes([var[7], var[8]]) as usize;
+    assert_eq!(
+        var.len(),
+        7 + 2 + padding_len,
+        "address, padding length, padding"
+    );
+
+    let mut resp_salt = vec![0u8; method.key_len];
+    rand::rng().fill_bytes(&mut resp_salt);
+    let resp_cipher = method.aead(&method.session_subkey(&resp_salt)).unwrap();
+    let mut resp_nonce = vec![0u8; NONCE_LEN];
+    let mut response_started = false;
+
+    // HTTP mode: one response header, then raw bytes. The 2022 response starts
+    // right behind it.
+    wr.write_all(b"HTTP/1.1 200 OK\r\nServer: obfs\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut len_buf = vec![0u8; 2 + TAG_LEN];
+    loop {
+        if rd.read_exact(&mut len_buf).await.is_err() {
+            return;
+        }
+        let len_plain = cipher.open(&nonce, &len_buf).unwrap();
+        increment_nonce(&mut nonce);
+        let len = u16::from_be_bytes([len_plain[0], len_plain[1]]) as usize;
+        let mut payload = vec![0u8; len + TAG_LEN];
+        rd.read_exact(&mut payload).await.unwrap();
+        let plain = cipher.open(&nonce, &payload).unwrap();
+        increment_nonce(&mut nonce);
+        let reply: Vec<u8> = plain.iter().map(|byte| byte.to_ascii_uppercase()).collect();
+
+        if response_started {
+            let mut chunk = Vec::new();
+            chunk.extend_from_slice(
+                &resp_cipher
+                    .seal(&resp_nonce, &(reply.len() as u16).to_be_bytes())
+                    .unwrap(),
+            );
+            increment_nonce(&mut resp_nonce);
+            chunk.extend_from_slice(&resp_cipher.seal(&resp_nonce, &reply).unwrap());
+            increment_nonce(&mut resp_nonce);
+            wr.write_all(&chunk).await.unwrap();
+        } else {
+            response_started = true;
+            let mut header = resp_salt.clone();
+            let mut fixed = Vec::new();
+            fixed.push(HEADER_TYPE_SERVER);
+            fixed.extend_from_slice(&unix_timestamp().to_be_bytes());
+            fixed.extend_from_slice(&salt);
+            fixed.extend_from_slice(&(reply.len() as u16).to_be_bytes());
+            header.extend_from_slice(&resp_cipher.seal(&resp_nonce, &fixed).unwrap());
+            increment_nonce(&mut resp_nonce);
+            header.extend_from_slice(&resp_cipher.seal(&resp_nonce, &reply).unwrap());
+            increment_nonce(&mut resp_nonce);
+            wr.write_all(&header).await.unwrap();
+        }
+    }
+}
