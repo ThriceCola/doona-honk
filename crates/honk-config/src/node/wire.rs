@@ -580,28 +580,13 @@ impl FlatNode {
         let mut flat = self;
         let outbound = match flat.protocol {
             NodeProtocol::SS => {
-                let plugin = match flat.plugin.take().filter(|name| !name.trim().is_empty()) {
-                    Some(name) => Some(
-                        ShadowsocksPlugin::parse(&name, flat.plugin_opts.take().as_deref())
-                            .map_err(|reason| {
-                                semantic_error(source, setting.clone().field("plugin"), reason)
-                            })?,
-                    ),
-                    None => {
-                        if flat
-                            .plugin_opts
-                            .take()
-                            .is_some_and(|options| !options.trim().is_empty())
-                        {
-                            return Err(semantic_error(
-                                source,
-                                setting.clone().field("plugin_opts"),
-                                "Shadowsocks plugin options require a plugin",
-                            ));
-                        }
-                        None
-                    }
-                };
+                let plugin = ShadowsocksPlugin::from_flat(
+                    flat.plugin.as_deref(),
+                    flat.plugin_opts.as_deref(),
+                )
+                .map_err(|(field, reason)| {
+                    semantic_error(source, setting.clone().field(field), reason)
+                })?;
                 OutboundConfig::Shadowsocks(ShadowsocksConfig {
                     password: flat.password.take(),
                     encryption: flat.encryption.take(),

@@ -395,16 +395,7 @@ fn shadowsocks_plugin(mapping: &Mapping) -> Result<Option<ShadowsocksPlugin>, &'
         Some(serde_yaml::Value::Mapping(options)) => Some(obfs_option_string(options)?),
         Some(_) => return Err("Shadowsocks plugin options must be a mapping or a string"),
     };
-    let Some(name) = name else {
-        if options
-            .as_deref()
-            .is_some_and(|options| !options.is_empty())
-        {
-            return Err("Shadowsocks plugin options require a plugin");
-        }
-        return Ok(None);
-    };
-    ShadowsocksPlugin::parse(&name, options.as_deref()).map(Some)
+    ShadowsocksPlugin::from_flat(name.as_deref(), options.as_deref()).map_err(|(_, reason)| reason)
 }
 
 /// Render Clash's option mapping as the SIP003 `key=value;...` string so one

@@ -428,22 +428,10 @@ pub(super) fn apply_protocol(
             let options = query
                 .get("plugin-opts")
                 .or_else(|| query.get("plugin_opts"))
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty());
-            config.plugin = match query.get("plugin").map(|value| value.trim()) {
-                Some(name) if !name.is_empty() => Some(
-                    ShadowsocksPlugin::parse(name, options)
-                        .map_err(|reason| super::plugin_error(source, "plugin", reason))?,
-                ),
-                _ if options.is_some() => {
-                    return Err(super::plugin_error(
-                        source,
-                        "plugin_opts",
-                        "Shadowsocks plugin options require a plugin",
-                    ));
-                }
-                _ => None,
-            };
+                .map(String::as_str);
+            config.plugin =
+                ShadowsocksPlugin::from_flat(query.get("plugin").map(String::as_str), options)
+                    .map_err(|(field, reason)| super::plugin_error(source, field, reason))?;
         }
         OutboundConfig::Vmess(config) if shadowrocket => {
             config.encryption = vmess_cipher(

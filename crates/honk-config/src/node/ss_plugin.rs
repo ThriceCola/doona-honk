@@ -154,9 +154,28 @@ impl ShadowsocksObfs {
 }
 
 impl ShadowsocksPlugin {
-    /// Parse a plugin name with its options, as flat fields, Clash fields and
-    /// share links carry them. Options may arrive inside the name
-    /// (`obfs-local;obfs=http`) or beside it (`plugin_opts`).
+    /// Parse the `plugin` + `plugin_opts` pair every adapter carries, so
+    /// "options without a plugin" is rejected in exactly one place. A blank
+    /// name or option string is absent, not a value.
+    pub fn from_flat(
+        name: Option<&str>,
+        options: Option<&str>,
+    ) -> Result<Option<Self>, (&'static str, &'static str)> {
+        let options = options.map(str::trim).filter(|options| !options.is_empty());
+        match name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => Self::parse(name, options)
+                .map(Some)
+                .map_err(|reason| ("plugin", reason)),
+            None if options.is_some() => {
+                Err(("plugin_opts", "Shadowsocks plugin options require a plugin"))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Parse a plugin name with its options, as a share link, flat
+    /// configuration or record carries them. Options may arrive inside the
+    /// name (`obfs-local;obfs=http`) or beside it (`plugin_opts`).
     pub fn parse(name: &str, options: Option<&str>) -> Result<Self, &'static str> {
         let (name, inline) = match name.split_once(';') {
             Some((name, rest)) => (name, Some(rest)),
