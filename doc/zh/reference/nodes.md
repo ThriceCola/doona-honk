@@ -31,7 +31,7 @@ Node 模型包含下列字段。分享链接会从协议方案、userinfo、地�
 | `encryption` | string? | `null` | SS/VMess 加密方式或 VLESS Encryption 客户端字符串；Shadowsocks 省略时在拨号阶段回退到 `aes-128-gcm`。见 [Encryption](#encryption)。 |
 | `packet_encoding` | `VlessUdpEncoding` | VLESS 为 `auto` | VLESS 回退编码：`auto`、`native`、`xudp` 或 `uot-v2`；规范 URI 的 `packetEncoding=none` 映射为 `native`。 |
 | `multiplex` | `VlessMultiplex` | VLESS 为 `{"protocol":"off"}` | VLESS carrier 选择：`off`、`h2` 或 `xray`；形态见 [VLESS UDP 与多路复用](#vless-udp-and-multiplexing)。 |
-| `plugin` / `plugin_opts` | string? | `null` | SIP002 插件元数据；代理插件不受支持，订阅导入会拒绝非空值。 |
+| `plugin` / `plugin_opts` | string? | `null` | SIP002 插件名与选项字符串。honk 只实现 simple-obfs，见 [simple-obfs](#simple-obfs)。 |
 | `transport` | string | `"tcp"` | 流传输：空值或 `tcp`、`ws`、`grpc`，或输入 `splithttp` 规范化成的 `xhttp`；见[流传输](#流传输)。 |
 | `tls` | bool | `false` | 流 TLS 标志；Trojan 与 AnyTLS 链接会开启它，规范 VLESS 链接保留历史上默认开启的行为。 |
 | `sni` | string? | `null` | TLS 服务端名称；非空的 `sni` 与 `peer` 必须一致，未被传输层使用的 `host` 作为回退值。 |
@@ -381,6 +381,22 @@ Shadowsocks UDP（传统 AEAD 与 2022）为每个客户端源的所有目的地
 回包返回服务端报告的真实远端地址，因此只要服务端转发，从未联系过的主机也能到达客户端；声明为非拨号域名的回包会被丢弃。
 
 与拨号目标不同的名称从不逐数据报发送。真实服务端，例如 sing-box 1.12.4，会按首个目的地固定 outbound 形态；之后出现不同名称就会终止 association，因此这类名称以数值目标发出。
+
+### simple-obfs
+
+`plugin`/`plugin_opts` 声明 SIP002 插件，而 honk 只实现 simple-obfs。插件位于加密层**之下**：它承载的是 Shadowsocks 密文，所以它伪装出的第一个数据包就是本连接的 salt 和密封地址块。接受的插件名是 `obfs`（Clash 和 Mihomo 的写法）、`obfs-local`、`simple-obfs` 和 `simpleobfs`（SIP003 与 dae 的写法）。其他名字会让该条目被拒绝；honk 绝不会用明文 Shadowsocks 去连混淆服务器。
+
+| 选项 | 别名 | 含义 |
+| --- | --- | --- |
+| `mode` | `obfs` | 必填，`http` 或 `tls`。 |
+| `host` | `obfs-host` | `http` 的 `Host` 头，或 `tls` 的 SNI。缺省时使用服务器 host。 |
+| `path` | `obfs-path`、`obfs-uri` | `http` 的请求路径，默认 `/`。与 `tls` 同时出现时拒绝该节点。 |
+
+选项字符串是 SIP003 的 `key=value;key=value`；Clash 的 `plugin-opts` 映射用同一套 key。未知 key、同一选项给出两个不同值、缺少或未知的 mode，以及只有 `plugin_opts` 而没有 `plugin`，在所有导入入口都会被拒绝。`http` 把首个密文包进一个 `GET <path> HTTP/1.1` 请求，带 `Host`、`User-Agent: curl/7.x.y`、`Upgrade: websocket`、`Connection: Upgrade`、`Sec-WebSocket-Key` 和 `Content-Length`，之后字节直通，并在读侧消费到服务端响应头的终止符。`tls` 把首个密文放进伪 ClientHello 的 session ticket 扩展，SNI 写插件 host，之后两个方向都按 16 KiB 一块封装成 TLS 记录。
+
+插件形态会进入节点身份，因此只有混淆配置不同的两个条目是两个不同节点。没有插件的节点保持建模插件之前就有的身份。
+
+Shadowsocks 的 UDP 不变：simple-obfs 只混淆 TCP，数据报仍以明文 Shadowsocks 发往节点的 `host:port`，与 dae、Mihomo 一致。因此带插件的节点仍然报告支持 UDP。
 
 ### 流传输
 
@@ -830,7 +846,7 @@ XHTTP 以外，未知查询 key 会被忽略，因此拼错 key 名不会报错�
 
 明文 `method:password` userinfo 中的方法本身可以是 Base64，例如 `ss://YWVzLTEyOC1nY20=:password@host:port`。无法得到方法和密码的 userinfo 会整体作为密码，方法回退到 `aes-128-gcm`。
 
-honk 不运行 Shadowsocks 插件。`plugin=name;options`、`plugin-opts` 和 `plugin_opts` 只作为元数据保留；其他 scheme 出现这些 key 会被拒绝。
+Shadowsocks 链接用 `plugin=name;options` 携带 SIP002 插件，`plugin-opts` 和 `plugin_opts` 是选项别名。honk 实现 simple-obfs，见 [simple-obfs](#simple-obfs)。其他 scheme 出现这些 key 会被拒绝；honk 不认识的插件名会让该条目被拒绝，而不是当成明文 Shadowsocks 拨号。
 
 SOCKS5 只在链接同时带有用户名和密码时提供用户名/密码认证，两者各不得超过 255 字节。
 

@@ -31,7 +31,7 @@ Flat structured input requires `name`, `protocol`, `address` and `port`, even wh
 | `encryption` | string? | `null` | SS/VMess cipher or VLESS Encryption client string; Shadowsocks falls back to `aes-128-gcm` at dial time when omitted. See [Encryption](#encryption). |
 | `packet_encoding` | `VlessUdpEncoding` | VLESS `auto` | VLESS fallback encoding: `auto`, `native`, `xudp` or `uot-v2`; the canonical URI `packetEncoding=none` maps to `native`. |
 | `multiplex` | `VlessMultiplex` | VLESS `{"protocol":"off"}` | VLESS carrier selection: `off`, `h2` or `xray`; shapes are under [VLESS UDP and multiplexing](#vless-udp-and-multiplexing). |
-| `plugin` / `plugin_opts` | string? | `null` | SIP002 plugin metadata; subscription import rejects a non-empty value because proxy plugins are unsupported. |
+| `plugin` / `plugin_opts` | string? | `null` | SIP002 plugin name and option string. honk implements simple-obfs only; see [simple-obfs](#simple-obfs). |
 | `transport` | string | `"tcp"` | Stream transport: empty or `tcp`, `ws`, `grpc`, or canonical `xhttp`, which input `splithttp` normalizes to; see [Stream transports](#stream-transports). |
 | `tls` | bool | `false` | Stream TLS flag; Trojan and AnyTLS links enable it, and canonical VLESS links keep the historical enabled default. |
 | `sni` | string? | `null` | TLS server name; non-empty `sni` and `peer` claims must agree, then an unconsumed `host` supplies the fallback. |
@@ -391,6 +391,22 @@ honk never sends a name other than the dialed one per datagram. Real servers
 (sing-box 1.12.4) pin their outbound form by the first destination and end the
 association on a later different name, so such a name goes out as the numeric
 target.
+
+### simple-obfs
+
+`plugin`/`plugin_opts` declare a SIP003 plugin, and honk implements simple-obfs only. The plugin sits *below* the cipher: it carries Shadowsocks ciphertext, so its first obfuscated packet is the connection's own salt and sealed address chunk. Accepted names are `obfs` (Clash and Mihomo), `obfs-local`, `simple-obfs` and `simpleobfs` (the SIP003 and dae spellings). Any other name rejects the entry; honk never dials plain Shadowsocks at an obfuscated server.
+
+| Option | Aliases | Meaning |
+| --- | --- | --- |
+| `mode` | `obfs` | Required; `http` or `tls`. |
+| `host` | `obfs-host` | `Host` header for `http`, SNI for `tls`. Absent uses the server host. |
+| `path` | `obfs-path`, `obfs-uri` | Request path for `http`; defaults to `/`. Stating one with `tls` rejects the node. |
+
+The option string is SIP003's `key=value;key=value`; Clash's `plugin-opts` mapping carries the same keys. An unknown key, two different values for one option, a missing or unknown mode, and `plugin_opts` without a `plugin` all reject the entry at every import entry. `http` wraps the first ciphertext in one `GET <path> HTTP/1.1` request carrying `Host`, `User-Agent: curl/7.x.y`, `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Key` and `Content-Length`, passes later bytes through, and consumes the server's response header through its terminator. `tls` carries the first ciphertext in a fake ClientHello's session-ticket extension with the SNI set to the plugin host, then frames both directions as TLS records in 16 KiB chunks.
+
+The plugin shape joins the node identity, so two entries that differ only by obfs are different nodes. Nodes without a plugin keep the identity they had before plugins were modeled.
+
+Shadowsocks UDP is unchanged: simple-obfs obfuscates TCP only, so datagrams are still sent as plain Shadowsocks to the node's `host:port`, matching dae and Mihomo. A node with a plugin therefore still reports UDP support.
 
 ### Stream transports
 
@@ -844,7 +860,7 @@ Outside XHTTP, unknown query keys are ignored, so a misspelled key produces no e
 
 In plain `method:password` userinfo the method may itself be Base64, such as `ss://YWVzLTEyOC1nY20=:password@host:port`. Userinfo that yields no method and password becomes the whole password, and the method falls back to `aes-128-gcm`.
 
-honk runs no Shadowsocks plugins. `plugin=name;options`, `plugin-opts` and `plugin_opts` are kept only as metadata, and other schemes reject these keys.
+A Shadowsocks link carries its SIP002 plugin in `plugin=name;options`, with `plugin-opts` and `plugin_opts` as the option aliases. honk implements simple-obfs; see [simple-obfs](#simple-obfs). Other schemes reject these keys, and a plugin name honk does not implement rejects that entry instead of dialing plain Shadowsocks.
 
 SOCKS5 offers username/password authentication only when the link has both; each must fit in 255 bytes.
 

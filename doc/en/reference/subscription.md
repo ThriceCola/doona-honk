@@ -249,13 +249,13 @@ socks5://user:password@127.0.0.1:1080#local
 vless://00000000-0000-4000-8000-000000000000@example.com:443?security=tls#edge
 ```
 
-Blank lines, comments, and Shadowrocket `REMARKS=` / `STATUS=` metadata lines are ignored and produce no node warning. Every remaining line is parsed by `Node::from_share_link`. Unsupported or malformed lines are skipped with a warning. Share links with a non-empty proxy plugin are also skipped because honk does not execute plugins. The body is rejected when it contains no supported node URI, including metadata-only bodies. See the [node reference](./nodes.md) for canonical share-link fields and protocols.
+Blank lines, comments, and Shadowrocket `REMARKS=` / `STATUS=` metadata lines are ignored and produce no node warning. Every remaining line is parsed by `Node::from_share_link`. Unsupported or malformed lines are skipped with a warning. A share link's SIP002 plugin is imported when it names simple-obfs; any other plugin name skips that entry instead of dialing it as plain Shadowsocks. The body is rejected when it contains no supported node URI, including metadata-only bodies. See the [node reference](./nodes.md) for canonical share-link fields and protocols.
 
 ### Clash YAML and JSON
 
 A full profile or provider payload must contain a top-level `proxies` sequence. Entries without a supported `type`, server address, valid nonzero port, or required credentials are skipped. Ports may be integers or numeric strings. JSON is decoded natively, including UTF-16 surrogate-pair escapes in display names.
 
-Accepted `type` values are `socks5`, `ss`/`shadowsocks`, `trojan`, `vmess`, `vless`, `hysteria2`/`hysteria`, `tuic`, `juicity`, and `anytls`. Unrelated client metadata is ignored. Unsupported wire transports, proxy plugins, and contradictory security settings are not silently reinterpreted.
+Accepted `type` values are `socks5`, `ss`/`shadowsocks`, `trojan`, `vmess`, `vless`, `hysteria2`/`hysteria`, `tuic`, `juicity`, and `anytls`. Unrelated client metadata is ignored. Unsupported wire transports, a plugin honk does not implement, and contradictory security settings are not silently reinterpreted.
 
 #### Common proxy fields
 
@@ -266,7 +266,7 @@ Accepted `type` values are `socks5`, `ss`/`shadowsocks`, `trojan`, `vmess`, `vle
 | `username` | `username` | Optional string. |
 | `password` | `password` | Optional string; VLESS applies the precedence below. |
 | `cipher` | `encryption` | Optional string; VLESS applies the precedence below. |
-| `plugin`, `plugin-opts`, `plugin_opts` | — | Unsupported. An entry with any non-empty value is skipped before node publication. Mapping-valued options are rejected too. |
+| `plugin`, `plugin-opts`, `plugin_opts` | `plugin` | SIP002 plugin; only `ss` entries may carry them. `plugin-opts` accepts Mihomo's mapping or SIP003's `key=value;...` string. simple-obfs is imported (see the [node reference](./nodes.md#simple-obfs)); another name skips the entry, and options without a plugin are rejected. |
 | `network` | `transport` or packet capability | Trojan/VMess/VLESS use a stream transport (`tcp`, `ws`, `grpc`, or `xhttp`); AnyTLS uses packet capability. |
 | `tls` | `tls` | Optional boolean. Trojan, AnyTLS, Hysteria2, TUIC, and Juicity default to TLS and reject explicit disabling. |
 | `servername`, `server-name`, `sni` | `sni` | Empty or whitespace-only names are absent; nonempty aliases must agree byte for byte. |
@@ -373,7 +373,7 @@ Canonical VLESS share links use exact `packetEncoding=auto|none|xudp|uot-v2`, `m
 
 ### SIP008 and sing-box JSON or YAML
 
-SIP008 and sing-box bodies may be JSON or the equivalent YAML. SIP008 `{"servers":[...]}` wrappers and bare server arrays import Shadowsocks `server`, `server_port`, `method`, `password`, and `remarks`. A wrapper `version` must be the integer `1` or `2`. Empty plugin fields are harmless. Active plugins remain unsupported.
+SIP008 and sing-box bodies may be JSON or the equivalent YAML. SIP008 `{"servers":[...]}` wrappers and bare server arrays import Shadowsocks `server`, `server_port`, `method`, `password`, and `remarks`. A wrapper `version` must be the integer `1` or `2`. Empty plugin fields are harmless. An active `plugin`/`plugin_opts` pair must name simple-obfs; any other plugin skips that server.
 
 sing-box profiles import supported entries from `outbounds`:
 
@@ -416,7 +416,7 @@ AnyTLS record `network` occurrences are packet claims, not stream claims. Every 
 
 VLESS record `packet-encoding`/`packet_encoding`/`packetencoding` values `none` or empty select native UDP. `xudp` selects Single XUDP. Repeated aliases must agree, including explicit empty assignments. `udp`/`udp-relay` controls packet permission separately. With neither a packet encoding nor `udp: true`, a record remains UDP-disabled. `udp: true` without an encoding selects Single XUDP. Active record `mux` and UoT declarations remain unsupported rather than being reinterpreted.
 
-Supported records map credentials, TLS/SNI, WebSocket/gRPC, REALITY, and implemented protocol options to the same node model. Quantumult X `obfs=wss` uses `obfs-host` for both WebSocket Host and the default TLS SNI. An explicit TLS hostname wins. SSR, unsupported plugins/obfuscation, and unsupported transports are skipped rather than imported as another protocol.
+Supported records map credentials, TLS/SNI, WebSocket/gRPC, REALITY, and implemented protocol options to the same node model. Quantumult X `obfs=wss` uses `obfs-host` for both WebSocket Host and the default TLS SNI. An explicit TLS hostname wins. SSR, plugins or obfuscation honk does not implement, and unsupported transports are skipped rather than imported as another protocol. For `ss` records, `obfs=http`/`obfs=tls` with `obfs-host` and `obfs-uri`/`obfs-path` map to simple-obfs, and a `plugin=` string maps to the same shape.
 
 Surge `server-cert-fingerprint-sha256` maps to honk's leaf-certificate pin: both replace standard X.509 verification. Independent `server-cert-verify-name`, client certificates, `sni=off`, and Shadow TLS are not representable and are rejected rather than discarded ([Surge TLS reference](https://manual.nssurge.com/policies/tls.html)).
 

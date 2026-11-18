@@ -256,7 +256,7 @@ socks5://user:password@127.0.0.1:1080#local
 vless://00000000-0000-4000-8000-000000000000@example.com:443?security=tls#edge
 ```
 
-空行、注释和 Shadowrocket 的 `REMARKS=`、`STATUS=` 元信息行，honk 会忽略，也不产生节点 warning。其余每行交给 `Node::from_share_link` 解析；不支持或格式错误的行会跳过并记 warning。honk 不执行代理插件，所以带非空插件值的分享链接也跳过。正文里没有一个受支持的节点 URI 时，包括只有元信息的正文，honk 拒绝整个正文。规范的分享链接字段和协议见[节点参考](./nodes.md)。
+空行、注释和 Shadowrocket 的 `REMARKS=`、`STATUS=` 元信息行，honk 会忽略，也不产生节点 warning。其余每行交给 `Node::from_share_link` 解析；不支持或格式错误的行会跳过并记 warning。分享链接里的 SIP002 插件只要能识别为 simple-obfs 就会被导入；其他插件名会跳过该条目，而不是当成明文 Shadowsocks 拨号。正文里没有一个受支持的节点 URI 时，包括只有元信息的正文，honk 拒绝整个正文。规范的分享链接字段和协议见[节点参考](./nodes.md)。
 
 ### Clash YAML 与 JSON
 
@@ -273,7 +273,7 @@ vless://00000000-0000-4000-8000-000000000000@example.com:443?security=tls#edge
 | `username` | `username` | 可选 string。 |
 | `password` | `password` | 可选 string；VLESS 按下文列出的优先级取值。 |
 | `cipher` | `encryption` | 可选加密算法；VLESS 的字段优先级见下文。 |
-| `plugin`, `plugin-opts`, `plugin_opts` | — | 不支持。任一字段非空时，honk 在发布节点前跳过该条目，映射类型的 options 也拒绝。 |
+| `plugin`, `plugin-opts`, `plugin_opts` | `plugin` | SIP002 插件，只有 `ss` 条目可以携带。`plugin-opts` 接受 Mihomo 的映射，也接受 SIP003 的 `key=value;...` 字符串。simple-obfs 会被导入，见[节点参考](./nodes.md#simple-obfs)；其他名字跳过该条目，没有插件的选项会被拒绝。 |
 | `network` | `transport` 或数据包网络 capability | Trojan/VMess/VLESS 用流传输，可取 `tcp`、`ws`、`grpc`、`xhttp`；AnyTLS 用数据包网络 capability。 |
 | `tls` | `tls` | 可选 bool。Trojan、AnyTLS、Hysteria2、TUIC 和 Juicity 默认启用 TLS，显式关闭会被拒绝。 |
 | `servername`、`server-name`、`sni` | `sni` | 空值或纯空白名称视为未指定；非空别名必须逐字节一致。 |
@@ -380,7 +380,7 @@ VLESS 字段会在派生节点身份前应用：
 
 ### SIP008 与 sing-box JSON 或 YAML
 
-SIP008 和 sing-box 正文可以是 JSON，也可以是等价的 YAML。SIP008 的 `{"servers":[...]}` 封装和裸服务器数组会导入 Shadowsocks 的 `server`、`server_port`、`method`、`password` 和 `remarks`。封装里的 `version` 必须是整数 `1` 或 `2`。空的插件字段不会导致拒绝；有效的插件配置仍不受支持。
+SIP008 和 sing-box 正文可以是 JSON，也可以是等价的 YAML。SIP008 的 `{"servers":[...]}` 封装和裸服务器数组会导入 Shadowsocks 的 `server`、`server_port`、`method`、`password` 和 `remarks`。封装里的 `version` 必须是整数 `1` 或 `2`。空的插件字段不会导致拒绝；生效的 `plugin`/`plugin_opts` 必须是 simple-obfs，其他插件会跳过该服务器。
 
 sing-box 配置从 `outbounds` 导入受支持的条目：
 
@@ -423,7 +423,7 @@ AnyTLS 记录里的 `network` 表示数据包 capability，不是流传输方式
 
 VLESS 记录的 `packet-encoding`/`packet_encoding`/`packetencoding` 值为 `none` 或空时，选择原生 UDP；值为 `xudp` 时选择 Single XUDP。重复别名的值必须一致，显式空赋值也算。`udp`/`udp-relay` 单独控制数据包权限。既没有数据包编码也没有 `udp: true` 时，记录保持 UDP 关闭；只有 `udp: true` 时选择 Single XUDP。记录格式里有效的 `mux` 和 UoT 声明仍不受支持，honk 不会重新解释它们。
 
-受支持的记录把凭据、TLS/SNI、WebSocket/gRPC、REALITY 和已实现的协议选项映射到同一个节点模型。Quantumult X 的 `obfs=wss` 会把 `obfs-host` 同时用作 WebSocket Host 和默认 TLS SNI；显式 TLS 主机名优先。SSR、不支持的插件、混淆和传输方式，honk 直接跳过，不会当成别的协议导入。
+受支持的记录把凭据、TLS/SNI、WebSocket/gRPC、REALITY 和已实现的协议选项映射到同一个节点模型。Quantumult X 的 `obfs=wss` 会把 `obfs-host` 同时用作 WebSocket Host 和默认 TLS SNI；显式 TLS 主机名优先。SSR、honk 不实现的插件或混淆、以及不支持的传输方式，honk 直接跳过，不会当成别的协议导入。对 `ss` 记录，`obfs=http`/`obfs=tls` 连同 `obfs-host`、`obfs-uri`/`obfs-path` 会映射到 simple-obfs，`plugin=` 字符串映射到同一形态。
 
 Surge 的 `server-cert-fingerprint-sha256` 映射到 honk 的叶证书 pin，两者都替代标准 X.509 验证。`server-cert-verify-name`、客户端证书、`sni=off` 和 Shadow TLS 在 honk 里表达不出来，honk 会拒绝，不会直接忽略，见 [Surge TLS 参考](https://manual.nssurge.com/policies/tls.html)。
 
