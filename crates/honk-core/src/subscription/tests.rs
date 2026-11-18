@@ -372,6 +372,35 @@ fn test_parse_subscription_admits_simple_obfs_and_skips_unknown_plugins() {
     assert!(simple_nodes[0].shadowsocks().unwrap().plugin.is_some());
 }
 
+/// Clash options without a plugin are rejected exactly like the flat and
+/// share-link forms, not imported as plain Shadowsocks.
+#[test]
+fn clash_plugin_options_without_a_plugin_are_rejected() {
+    let nodes = parse_subscription_content(
+        &Subscription {
+            sub_type: SubscriptionType::Clash,
+            ..Default::default()
+        },
+        r#"proxies:
+  - name: orphan-options
+    type: ss
+    server: ss.example
+    port: 8388
+    cipher: aes-128-gcm
+    password: secret
+    plugin-opts:
+      mode: http
+  - name: plain
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+"#,
+    )
+    .unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].name, "plain");
+}
+
 /// One provider entry, four dialects. The typed plugin and the node identity
 /// must not depend on which one carried it. The expected UUID is a hard-coded
 /// golden (the `honk-config` plain-node golden plus this plugin's dial shape),

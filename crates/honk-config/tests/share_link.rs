@@ -291,6 +291,22 @@ fn test_ss_unsupported_plugin_is_rejected() {
     );
 }
 
+/// Options without a plugin are rejected everywhere; the flat form is covered
+/// in `shadowsocks_plugin.rs`, this is the share-link entry.
+#[test]
+fn test_ss_plugin_options_without_a_plugin_are_rejected() {
+    let error = Node::from_share_link(
+        "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin-opts=obfs%3Dhttp#ss",
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("plugin options require a plugin"),
+        "unexpected error: {error}"
+    );
+}
+
 /// A plugin option that cannot apply is a configuration error, not something to
 /// drop on the floor.
 #[test]
