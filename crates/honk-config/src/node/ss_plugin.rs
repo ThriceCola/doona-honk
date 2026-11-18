@@ -19,8 +19,9 @@ use super::identity_field;
 /// The name honk writes back into flat configurations.
 const SIMPLE_OBFS_WIRE_NAME: &str = "obfs-local";
 
-/// Names that select simple-obfs. Clash writes `obfs`, SIP003 clients and dae
-/// write `obfs-local` (dae also accepts `simpleobfs`).
+/// Names that select simple-obfs: Clash writes `obfs`; the SIP003 client is
+/// `obfs-local`; dae's `ParseSip003` additionally accepts `simpleobfs` and
+/// passes `simple-obfs` through unchanged.
 const SIMPLE_OBFS_NAMES: &[&str] = &["obfs", "obfs-local", "simple-obfs", "simpleobfs"];
 
 const UNSUPPORTED_PLUGIN: &str = "unsupported Shadowsocks plugin; honk implements simple-obfs";

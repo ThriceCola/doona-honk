@@ -394,7 +394,7 @@ target.
 
 ### simple-obfs
 
-`plugin`/`plugin_opts` declare a SIP003 plugin, and honk implements simple-obfs only. The plugin sits *below* the cipher: it carries Shadowsocks ciphertext, so its first obfuscated packet is the connection's own salt and sealed address chunk. Accepted names are `obfs` (Clash and Mihomo), `obfs-local`, `simple-obfs` and `simpleobfs` (the SIP003 and dae spellings). Any other name rejects the entry; honk never dials plain Shadowsocks at an obfuscated server.
+`plugin`/`plugin_opts` declare a SIP003 plugin, and honk implements simple-obfs only. The plugin sits *below* the cipher: it carries Shadowsocks ciphertext, so its first obfuscated packet is the connection's own salt and sealed address chunk. Accepted names are `obfs` (Clash and Mihomo), `obfs-local` (the SIP003 client name), and `simple-obfs`/`simpleobfs` (what dae's `ParseSip003` accepts besides `obfs-local`). Any other name rejects the entry; honk never dials plain Shadowsocks at an obfuscated server.
 
 | Option | Aliases | Meaning |
 | --- | --- | --- |

@@ -384,7 +384,7 @@ Shadowsocks UDP（传统 AEAD 与 2022）为每个客户端源的所有目的地
 
 ### simple-obfs
 
-`plugin`/`plugin_opts` 声明 SIP002 插件，而 honk 只实现 simple-obfs。插件位于加密层**之下**：它承载的是 Shadowsocks 密文，所以它伪装出的第一个数据包就是本连接的 salt 和密封地址块。接受的插件名是 `obfs`（Clash 和 Mihomo 的写法）、`obfs-local`、`simple-obfs` 和 `simpleobfs`（SIP003 与 dae 的写法）。其他名字会让该条目被拒绝；honk 绝不会用明文 Shadowsocks 去连混淆服务器。
+`plugin`/`plugin_opts` 声明 SIP002 插件，而 honk 只实现 simple-obfs。插件位于加密层**之下**：它承载的是 Shadowsocks 密文，所以它伪装出的第一个数据包就是本连接的 salt 和密封地址块。接受的插件名是 `obfs`（Clash 和 Mihomo 的写法）、`obfs-local`（SIP003 客户端名），以及 `simple-obfs`/`simpleobfs`（dae 的 `ParseSip003` 除 `obfs-local` 外还接受这两种拼写）。其他名字会让该条目被拒绝；honk 绝不会用明文 Shadowsocks 去连混淆服务器。
 
 | 选项 | 别名 | 含义 |
 | --- | --- | --- |
