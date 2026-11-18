@@ -134,25 +134,6 @@ impl ObfsOptions {
     }
 }
 
-impl ShadowsocksObfs {
-    /// Build the typed shape from already-separated claims. Adapters that
-    /// carry options as a mapping (Clash) use this; string dialects go through
-    /// [`ShadowsocksPlugin::parse`].
-    pub fn from_options(
-        mode: Option<&str>,
-        host: Option<&str>,
-        path: Option<&str>,
-    ) -> Result<Self, &'static str> {
-        let mut options = ObfsOptions::default();
-        for (key, value) in [("mode", mode), ("host", host), ("path", path)] {
-            if let Some(value) = value {
-                options.claim(key, value)?;
-            }
-        }
-        options.into_shape()
-    }
-}
-
 impl ShadowsocksPlugin {
     /// Parse the `plugin` + `plugin_opts` pair every adapter carries, so
     /// "options without a plugin" is rejected in exactly one place. A blank
